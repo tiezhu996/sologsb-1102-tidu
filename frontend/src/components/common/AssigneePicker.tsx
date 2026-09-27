@@ -105,11 +105,19 @@ export function AssigneePicker({
         }
         onChange(next);
       }}
-      options={options.map((option) => ({
-        value: option.operator.id,
-        label: `${option.operator.name}${option.assessment.assignable ? '' : '（时段冲突）'}`,
-        disabled: !option.assessment.assignable,
-      }))}
+      options={options.map((option) => {
+        const taken = option.assessment.sameSceneRoleNames;
+        const suffix = option.assessment.assignable
+          ? ''
+          : taken.length > 0
+            ? `（本场已演 ${taken.join('、')}）`
+            : '（时段冲突）';
+        return {
+          value: option.operator.id,
+          label: `${option.operator.name}${suffix}`,
+          disabled: !option.assessment.assignable,
+        };
+      })}
       optionRender={(option) => {
         const item = options.find((entry) => entry.operator.id === option.value);
         if (!item) return option.label;
@@ -121,6 +129,10 @@ export function AssigneePicker({
               <Tag color="default">已派 {item.assignedCount} 个角色</Tag>
               {item.assessment.assignable ? (
                 <Tag color="green">可指派</Tag>
+              ) : item.assessment.sameSceneRoleNames.length > 0 ? (
+                <Tag color="red" icon={<WarningOutlined />}>
+                  本场已演 {item.assessment.sameSceneRoleNames.join('、')}
+                </Tag>
               ) : (
                 <Tag color="red" icon={<WarningOutlined />}>
                   时段冲突
@@ -184,7 +196,7 @@ export function AssigneePicker({
         <Alert
           type="warning"
           showIcon
-          message={`${conflictCount} 位操耍人时段冲突，已在下拉中标记并禁止指派`}
+          message={`${conflictCount} 位操耍人不可指派（时段冲突或本场已演其他角色），已在下拉中标记并禁止指派`}
           description={
             <Space direction="vertical" size={0}>
               {options

@@ -83,6 +83,29 @@ class ShadowPlayDatabase extends Dexie {
 
 export const db = new ShadowPlayDatabase();
 
+/**
+ * 把指定角色 id 从所有操耍人的已派名单中移除。
+ * 角色退场、场次或剧目删除时调用，保证 角色.operatorId ↔ 操耍人.assignedRoleIds 双向一致，
+ * 否则下拉里的「已派 N 个角色」计数会停在旧值，空出来的人被当成还占着场次。
+ */
+async function detachRolesFromOperators(roleIds: string[]): Promise<void> {
+  if (roleIds.length === 0) return;
+  const dropped = new Set(roleIds);
+  const holders = await db.operators
+    .filter((operator) => operator.assignedRoleIds.some((id) => dropped.has(id)))
+    .toArray();
+  if (holders.length === 0) return;
+  const stamp = nowIso();
+  await db.operators.bulkPut(
+    holders.map((operator) => ({
+      ...operator,
+      assignedRoleIds: operator.assignedRoleIds.filter((id) => !dropped.has(id)),
+      updatedAt: stamp,
+      revision: ROW_REVISION,
+    })),
+  );
+}
+
 /** 打开数据库：首次使用时灌入示例班社数据，保证界面不为空壳 */
 export async function initDatabase(): Promise<void> {
   await db.open();
@@ -107,15 +130,18 @@ export async function putPlay(row: PlayRow): Promise<void> {
 }
 
 export async function removePlay(id: string): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, db.operators, async () => {
     const scenes = await db.scenes.where('playId').equals(id).toArray();
     const sceneIds = scenes.map((scene) => scene.id);
+    let removedRoleIds: string[] = [];
     if (sceneIds.length > 0) {
+      removedRoleIds = await db.roles.where('sceneId').anyOf(sceneIds).primaryKeys();
       await db.roles.where('sceneId').anyOf(sceneIds).delete();
       await db.cues.where('sceneId').anyOf(sceneIds).delete();
     }
     await db.scenes.where('playId').equals(id).delete();
     await db.plays.delete(id);
+    await detachRolesFromOperators(removedRoleIds);
   });
 }
 
@@ -139,10 +165,12 @@ export async function putScenes(rows: SceneRow[]): Promise<void> {
 }
 
 export async function removeScene(id: string): Promise<void> {
-  await db.transaction('rw', db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.scenes, db.roles, db.cues, db.operators, async () => {
+    const removedRoleIds = await db.roles.where('sceneId').equals(id).primaryKeys();
     await db.roles.where('sceneId').equals(id).delete();
     await db.cues.where('sceneId').equals(id).delete();
     await db.scenes.delete(id);
+    await detachRolesFromOperators(removedRoleIds);
   });
 }
 
@@ -166,7 +194,10 @@ export async function putRole(row: RoleRow): Promise<void> {
 }
 
 export async function removeRole(id: string): Promise<void> {
-  await db.roles.delete(id);
+  await db.transaction('rw', db.roles, db.operators, async () => {
+    await db.roles.delete(id);
+    await detachRolesFromOperators([id]);
+  });
 }
 
 /* ----------------------------- 操耍人 ----------------------------- */

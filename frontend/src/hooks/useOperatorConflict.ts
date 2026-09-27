@@ -1,6 +1,8 @@
 /**
- * useOperatorConflict(roleIds)
- * 按操耍人已排时段计算冲突，并在指派时拦截；被角色指派页消费。
+ * useOperatorConflict(sceneRoles)
+ * 按操耍人已排时段计算冲突，并在指派时拦截；
+ * 同一场次一位操耍人只演一个影人角色，重复指派会被拦下并写明其本场已演角色。
+ * 被角色指派页消费。
  */
 import { useCallback, useMemo } from 'react';
 import { useOperatorStore } from '../stores/operatorStore';
@@ -17,6 +19,12 @@ export interface OperatorConflictPair {
   describe: string;
 }
 
+/** 冲突判定所需的场次角色参照（id + 角色名） */
+export interface SceneRoleRef {
+  id: string;
+  name: string;
+}
+
 /** 指派候选人的可评估信息 */
 export interface CandidateAssessment {
   operatorId: string;
@@ -26,6 +34,8 @@ export interface CandidateAssessment {
   selfConflictText: string;
   /** 与同场次其他影人操耍人的冲突 */
   crossConflicts: OperatorConflictPair[];
+  /** 本场中该操耍人已扮演的其他角色名（一人一场一角，不含当前正在评估的角色） */
+  sameSceneRoleNames: string[];
   /** 能否指派 */
   assignable: boolean;
   /** 拦截原因（assignable 为 false 时有值） */
@@ -55,12 +65,20 @@ function describePair(left: SlotRange, right: SlotRange): string {
   return `${left.label} 与 ${right.label} 在${WEEKDAY_LABEL[left.weekday]} ${from}-${to} 重叠`;
 }
 
-export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResult {
+export function useOperatorConflict(sceneRoles: SceneRoleRef[]): UseOperatorConflictResult {
   const operators = useOperatorStore((state) => state.operators);
   const loading = useOperatorStore((state) => state.loading);
   const loadOperators = useOperatorStore((state) => state.loadOperators);
   const slotRangesOf = useOperatorStore((state) => state.slotRangesOf);
   const selfConflicts = useOperatorStore((state) => state.selfConflicts);
+
+  /** 本场角色 id 列表与 角色 id → 角色名 索引 */
+  const roleIds = useMemo(() => sceneRoles.map((role) => role.id), [sceneRoles]);
+  const roleNameOf = useMemo(() => {
+    const map = new Map<string, string>();
+    sceneRoles.forEach((role) => map.set(role.id, role.name));
+    return map;
+  }, [sceneRoles]);
 
   /** 角色 id → 已指派操耍人 id */
   const roleOperatorMap = useMemo(() => {
@@ -112,6 +130,14 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
       const selfPairs = selfConflicts(operatorId);
       const selfText = selfPairs.map(([left, right]) => describePair(left, right)).join('；');
 
+      // 同一场次内该操耍人已扮演的其他角色（一人一场只能操耍一个影人角色，当前角色自身除外）
+      const candidate = operators.find((operator) => operator.id === operatorId);
+      const sameSceneRoleNames = candidate
+        ? candidate.assignedRoleIds
+            .filter((id) => id !== roleId && roleIds.includes(id))
+            .map((id) => roleNameOf.get(id) ?? '未命名角色')
+        : [];
+
       // 同一场次内容的其他角色已派操耍人（排除当前角色绑定的那位）
       const siblings = operators.filter(
         (operator) =>
@@ -130,12 +156,24 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
         });
       });
 
+      if (sameSceneRoleNames.length > 0) {
+        return {
+          operatorId,
+          selfConflict: selfPairs.length > 0,
+          selfConflictText: selfText,
+          crossConflicts,
+          sameSceneRoleNames,
+          assignable: false,
+          blockReason: `本场已演「${sameSceneRoleNames.join('」「')}」，一人一场只能操耍一个影人角色`,
+        };
+      }
       if (selfPairs.length > 0) {
         return {
           operatorId,
           selfConflict: true,
           selfConflictText: selfText,
           crossConflicts,
+          sameSceneRoleNames,
           assignable: false,
           blockReason: `该操耍人自身档期重叠：${selfText}`,
         };
@@ -146,6 +184,7 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
           selfConflict: false,
           selfConflictText: selfText,
           crossConflicts,
+          sameSceneRoleNames,
           assignable: false,
           blockReason: `与同场其他影人操耍人时段冲突：${crossConflicts[0].describe}`,
         };
@@ -155,11 +194,12 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
         selfConflict: false,
         selfConflictText: selfText,
         crossConflicts,
+        sameSceneRoleNames,
         assignable: true,
         blockReason: '',
       };
     },
-    [operators, roleIds, selfConflicts, slotRangesOf],
+    [operators, roleIds, roleNameOf, selfConflicts, slotRangesOf],
   );
 
   const bind = useCallback(

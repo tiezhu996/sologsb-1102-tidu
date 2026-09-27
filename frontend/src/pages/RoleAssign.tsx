@@ -2,7 +2,7 @@
  * /scenes/:id/roles 角色与操耍人指派
  * 影件备料勾选、唱白要点录入；消费 ShadowRole、Operator，复用 <AssigneePicker>。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -82,8 +82,8 @@ export default function RoleAssign() {
   const loadScenes = useSceneStore((state) => state.loadScenes);
   const plays = usePlayStore((state) => state.plays);
 
-  const roleIds = useMemo(() => roles.map((role) => role.id), [roles]);
-  const conflict = useOperatorConflict(roleIds);
+  /** 本场角色名册（含角色名）交给冲突判定：同一人重复派角时能在候选人处写明其已演角色 */
+  const conflict = useOperatorConflict(roles);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -381,7 +381,7 @@ export default function RoleAssign() {
           description={
             <Space direction="vertical" size={2}>
               <Typography.Text style={{ fontSize: 12 }}>
-                指派时会按操耍人已排时段拦截冲突；需要调整档期请到「操耍人档」增删时段。
+                同一操耍人一场只演一个影人角色，重复指派会被拦下并标明其本场已演角色；指派时还会按已排时段拦截冲突，需要调整档期请到「操耍人档」增删时段。
               </Typography.Text>
               {conflict.conflicts.slice(0, 3).map((pair) => (
                 <Typography.Text key={`${pair.left.slotId}-${pair.right.slotId}`} type="danger" style={{ fontSize: 12 }}>
@@ -427,7 +427,7 @@ export default function RoleAssign() {
                       onBlocked={(reason) => message.warning(reason)}
                     />
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      候选 {assessmentList.length} 人，其中 {blocked.length} 人因时段冲突被拦截。
+                      候选 {assessmentList.length} 人，其中 {blocked.length} 人被拦截（本场已演他角或时段冲突）。
                     </Typography.Text>
                   </Space>
                 );
