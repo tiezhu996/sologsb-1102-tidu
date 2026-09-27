@@ -107,12 +107,14 @@ export async function putPlay(row: PlayRow): Promise<void> {
 }
 
 export async function removePlay(id: string): Promise<void> {
-  await db.transaction('rw', db.plays, db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.plays, db.scenes, db.roles, db.operators, db.cues, async () => {
     const scenes = await db.scenes.where('playId').equals(id).toArray();
     const sceneIds = scenes.map((scene) => scene.id);
     if (sceneIds.length > 0) {
+      const roles = await db.roles.where('sceneId').anyOf(sceneIds).toArray();
       await db.roles.where('sceneId').anyOf(sceneIds).delete();
       await db.cues.where('sceneId').anyOf(sceneIds).delete();
+      await detachRoleIdsFromOperators(roles.map((role) => role.id));
     }
     await db.scenes.where('playId').equals(id).delete();
     await db.plays.delete(id);
@@ -139,14 +141,32 @@ export async function putScenes(rows: SceneRow[]): Promise<void> {
 }
 
 export async function removeScene(id: string): Promise<void> {
-  await db.transaction('rw', db.scenes, db.roles, db.cues, async () => {
+  await db.transaction('rw', db.scenes, db.roles, db.operators, db.cues, async () => {
+    const roles = await db.roles.where('sceneId').equals(id).toArray();
     await db.roles.where('sceneId').equals(id).delete();
     await db.cues.where('sceneId').equals(id).delete();
     await db.scenes.delete(id);
+    await detachRoleIdsFromOperators(roles.map((role) => role.id));
   });
 }
 
 /* ---------------------------- 影人角色 ---------------------------- */
+
+/**
+ * 把已删除的角色 id 从所有操耍人的已派名单中剔除。
+ * 角色退场（删角色／连带删场次、删剧目）时与角色删除放在同一事务，
+ * 避免操耍人档的 assignedRoleIds 残留悬空 id、下拉计数仍旧。
+ */
+async function detachRoleIdsFromOperators(roleIds: string[]): Promise<void> {
+  if (roleIds.length === 0) return;
+  const removed = new Set(roleIds);
+  await db.operators
+    .filter((operator) => operator.assignedRoleIds.some((id) => removed.has(id)))
+    .modify((operator) => {
+      operator.assignedRoleIds = operator.assignedRoleIds.filter((id) => !removed.has(id));
+      operator.updatedAt = nowIso();
+    });
+}
 
 export async function listRolesByScene(sceneId: string): Promise<RoleRow[]> {
   return db.roles.where('sceneId').equals(sceneId).toArray();
@@ -166,7 +186,10 @@ export async function putRole(row: RoleRow): Promise<void> {
 }
 
 export async function removeRole(id: string): Promise<void> {
-  await db.roles.delete(id);
+  await db.transaction('rw', db.roles, db.operators, async () => {
+    await db.roles.delete(id);
+    await detachRoleIdsFromOperators([id]);
+  });
 }
 
 /* ----------------------------- 操耍人 ----------------------------- */

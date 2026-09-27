@@ -1,6 +1,7 @@
 /**
- * useOperatorConflict(roleIds)
- * 按操耍人已排时段计算冲突，并在指派时拦截；被角色指派页消费。
+ * useOperatorConflict(sceneRoles)
+ * 按操耍人已排时段计算冲突，并在指派时拦截；同一场次一名操耍人只能演一个影人。
+ * 被角色指派页消费。
  */
 import { useCallback, useMemo } from 'react';
 import { useOperatorStore } from '../stores/operatorStore';
@@ -8,6 +9,12 @@ import { db, ROW_REVISION } from '../utils/db';
 import { nowIso } from '../utils/uuid';
 import type { SlotRange, Weekday } from '../types/operator';
 import { WEEKDAY_LABEL, minuteToClock, slotsOverlap } from '../types/operator';
+
+/** 本场角色的最小信息（判定同场重复出演时需要角色名） */
+export interface SceneRoleRef {
+  id: string;
+  name: string;
+}
 
 /** 两个操耍人时段的冲突描述 */
 export interface OperatorConflictPair {
@@ -26,6 +33,8 @@ export interface CandidateAssessment {
   selfConflictText: string;
   /** 与同场次其他影人操耍人的冲突 */
   crossConflicts: OperatorConflictPair[];
+  /** 同一场次中该操耍人已演的其他角色名（一人一场一角，非空即拦截） */
+  sceneRoleNames: string[];
   /** 能否指派 */
   assignable: boolean;
   /** 拦截原因（assignable 为 false 时有值） */
@@ -55,12 +64,20 @@ function describePair(left: SlotRange, right: SlotRange): string {
   return `${left.label} 与 ${right.label} 在${WEEKDAY_LABEL[left.weekday]} ${from}-${to} 重叠`;
 }
 
-export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResult {
+export function useOperatorConflict(sceneRoles: SceneRoleRef[]): UseOperatorConflictResult {
   const operators = useOperatorStore((state) => state.operators);
   const loading = useOperatorStore((state) => state.loading);
   const loadOperators = useOperatorStore((state) => state.loadOperators);
   const slotRangesOf = useOperatorStore((state) => state.slotRangesOf);
   const selfConflicts = useOperatorStore((state) => state.selfConflicts);
+
+  /** 本场角色 id 列表与 id → 角色名映射 */
+  const roleIds = useMemo(() => sceneRoles.map((role) => role.id), [sceneRoles]);
+  const roleNameOf = useMemo(() => {
+    const map = new Map<string, string>();
+    sceneRoles.forEach((role) => map.set(role.id, role.name));
+    return map;
+  }, [sceneRoles]);
 
   /** 角色 id → 已指派操耍人 id */
   const roleOperatorMap = useMemo(() => {
@@ -112,6 +129,12 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
       const selfPairs = selfConflicts(operatorId);
       const selfText = selfPairs.map(([left, right]) => describePair(left, right)).join('；');
 
+      // 同一场次一人只演一个影人：先看该操耍人本场已演了谁（排除当前角色自身）
+      const candidate = operators.find((operator) => operator.id === operatorId);
+      const sceneRoleNames = (candidate?.assignedRoleIds ?? [])
+        .filter((id) => id !== roleId && roleIds.includes(id))
+        .map((id) => roleNameOf.get(id) ?? '未具名角色');
+
       // 同一场次内容的其他角色已派操耍人（排除当前角色绑定的那位）
       const siblings = operators.filter(
         (operator) =>
@@ -130,12 +153,24 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
         });
       });
 
+      if (sceneRoleNames.length > 0) {
+        return {
+          operatorId,
+          selfConflict: selfPairs.length > 0,
+          selfConflictText: selfText,
+          crossConflicts,
+          sceneRoleNames,
+          assignable: false,
+          blockReason: `本场已演「${sceneRoleNames.join('、')}」，一人一场只能操耍一个影人`,
+        };
+      }
       if (selfPairs.length > 0) {
         return {
           operatorId,
           selfConflict: true,
           selfConflictText: selfText,
           crossConflicts,
+          sceneRoleNames,
           assignable: false,
           blockReason: `该操耍人自身档期重叠：${selfText}`,
         };
@@ -146,6 +181,7 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
           selfConflict: false,
           selfConflictText: selfText,
           crossConflicts,
+          sceneRoleNames,
           assignable: false,
           blockReason: `与同场其他影人操耍人时段冲突：${crossConflicts[0].describe}`,
         };
@@ -155,11 +191,12 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
         selfConflict: false,
         selfConflictText: selfText,
         crossConflicts,
+        sceneRoleNames,
         assignable: true,
         blockReason: '',
       };
     },
-    [operators, roleIds, selfConflicts, slotRangesOf],
+    [operators, roleIds, roleNameOf, selfConflicts, slotRangesOf],
   );
 
   const bind = useCallback(
@@ -180,9 +217,11 @@ export function useOperatorConflict(roleIds: string[]): UseOperatorConflictResul
           revision: ROW_REVISION,
         });
       }
-      // 换人时解掉原操耍人的绑定
-      const previousHolder = operators.find((item) => item.id !== operatorId && item.assignedRoleIds.includes(roleId));
-      if (previousHolder) {
+      // 换人时解掉原操耍人的绑定（历史脏数据下可能多人持有，一并清理）
+      const previousHolders = operators.filter(
+        (item) => item.id !== operatorId && item.assignedRoleIds.includes(roleId),
+      );
+      for (const previousHolder of previousHolders) {
         await db.operators.put({
           ...previousHolder,
           assignedRoleIds: previousHolder.assignedRoleIds.filter((id) => id !== roleId),

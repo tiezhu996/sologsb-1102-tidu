@@ -140,29 +140,45 @@ export default function OperatorList() {
     [roles],
   );
 
-  /** 操耍人档里的指派选择器：按当前操耍人已派角色评估冲突（用于「换绑」演示） */
+  /** 操耍人档里的指派选择器：按当前操耍人已派角色评估冲突（用于「换绑」演示）
+   *  换绑目标若在本场已演其他影人，同样按「一人一场一角」拦截 */
   const pickerOptionsFor = useCallback(
-    (operator: OperatorRow): AssigneeOption[] =>
-      operators.map((candidate) => ({
-        operator: candidate,
-        assessment: {
-          operatorId: candidate.id,
-          selfConflict: selfConflicts(candidate.id).length > 0,
-          selfConflictText: selfConflicts(candidate.id)
-            .map(([left, right]) => `${left.label} × ${right.label}`)
-            .join('；'),
-          crossConflicts: [],
-          assignable: candidate.id === operator.id || selfConflicts(candidate.id).length === 0,
-          blockReason:
-            candidate.id === operator.id
-              ? ''
-              : selfConflicts(candidate.id).length > 0
-                ? `${candidate.name} 自身档期重叠，需先错开时段`
-                : '',
-        },
-        assignedCount: candidate.assignedRoleIds.length,
-      })),
-    [operators, selfConflicts],
+    (operator: OperatorRow, movingRole?: RoleRow): AssigneeOption[] =>
+      operators.map((candidate) => {
+        const selfPairs = selfConflicts(candidate.id);
+        const sceneClash =
+          movingRole && candidate.id !== operator.id
+            ? roles.find(
+                (role) =>
+                  role.sceneId === movingRole.sceneId &&
+                  role.id !== movingRole.id &&
+                  candidate.assignedRoleIds.includes(role.id),
+              )
+            : undefined;
+        const sceneRoleNames = sceneClash ? [sceneClash.name] : [];
+        const blocked = candidate.id !== operator.id && (selfPairs.length > 0 || sceneRoleNames.length > 0);
+        return {
+          operator: candidate,
+          assessment: {
+            operatorId: candidate.id,
+            selfConflict: selfPairs.length > 0,
+            selfConflictText: selfPairs.map(([left, right]) => `${left.label} × ${right.label}`).join('；'),
+            crossConflicts: [],
+            sceneRoleNames,
+            assignable: !blocked,
+            blockReason:
+              candidate.id === operator.id
+                ? ''
+                : sceneRoleNames.length > 0
+                  ? `本场已演「${sceneRoleNames.join('、')}」，一人一场只能操耍一个影人`
+                  : selfPairs.length > 0
+                    ? `${candidate.name} 自身档期重叠，需先错开时段`
+                    : '',
+          },
+          assignedCount: candidate.assignedRoleIds.length,
+        };
+      }),
+    [operators, roles, selfConflicts],
   );
 
   const totalHours = operators.reduce((acc, operator) => acc + operator.rehearsalHours, 0);
@@ -470,7 +486,7 @@ export default function OperatorList() {
                         <div style={{ marginTop: 6 }}>
                           <AssigneePicker
                             value={operator.id}
-                            options={pickerOptionsFor(operator)}
+                            options={pickerOptionsFor(operator, boundRoles[0])}
                             compact
                             showConflictAlert={false}
                             allowClear={false}
@@ -485,6 +501,18 @@ export default function OperatorList() {
                               const roleId = boundRoles[0].id;
                               const role = roles.find((item) => item.id === roleId);
                               if (!next || !role) return;
+                              const sceneClash = roles.find(
+                                (item) =>
+                                  item.sceneId === role.sceneId &&
+                                  item.id !== roleId &&
+                                  next.assignedRoleIds.includes(item.id),
+                              );
+                              if (sceneClash) {
+                                message.warning(
+                                  `${next.name} 本场已演「${sceneClash.name}」，一人一场只能操耍一个影人`,
+                                );
+                                return;
+                              }
                               const updatedRole: RoleRow = { ...role, operatorId: nextId, updatedAt: nowIso(), revision: ROW_REVISION };
                               const { db } = await import('../utils/db');
                               await db.roles.put(updatedRole);

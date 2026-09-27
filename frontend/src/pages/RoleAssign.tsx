@@ -57,6 +57,7 @@ import { SHADOW_SCREEN_LABEL } from '../types/scene';
 import {
   ROW_REVISION,
   getScene,
+  listAllRoles,
   listRolesByScene,
   putRole,
   removeRole,
@@ -82,8 +83,10 @@ export default function RoleAssign() {
   const loadScenes = useSceneStore((state) => state.loadScenes);
   const plays = usePlayStore((state) => state.plays);
 
-  const roleIds = useMemo(() => roles.map((role) => role.id), [roles]);
-  const conflict = useOperatorConflict(roleIds);
+  const sceneRoleRefs = useMemo(() => roles.map((role) => ({ id: role.id, name: role.name })), [roles]);
+  const conflict = useOperatorConflict(sceneRoleRefs);
+
+  const syncAssignments = useOperatorStore((state) => state.syncAssignments);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -96,8 +99,10 @@ export default function RoleAssign() {
     setLoading(false);
     if (sceneRow) {
       await Promise.all([loadScenes(sceneRow.playId), loadOperators()]);
+      // 以角色表为准对账操耍人档：角色退场或改派后悬空的已派 id 在此清掉，保证下拉计数为新
+      await syncAssignments(await listAllRoles());
     }
-  }, [loadOperators, loadScenes, sceneId]);
+  }, [loadOperators, loadScenes, sceneId, syncAssignments]);
 
   useEffect(() => {
     void reload();
@@ -177,7 +182,7 @@ export default function RoleAssign() {
     }
     const ok = await conflict.bind(roleId, operatorId);
     if (!ok) {
-      message.error('指派被时段冲突拦截');
+      message.error('指派被拦截（时段冲突或本场已演其他影人）');
       return;
     }
     const holder = operators.find((operator) => operator.id === operatorId);
@@ -381,7 +386,7 @@ export default function RoleAssign() {
           description={
             <Space direction="vertical" size={2}>
               <Typography.Text style={{ fontSize: 12 }}>
-                指派时会按操耍人已排时段拦截冲突；需要调整档期请到「操耍人档」增删时段。
+                指派时会按操耍人已排时段拦截冲突，且同一场次一人只能操耍一个影人；需要调整档期请到「操耍人档」增删时段。
               </Typography.Text>
               {conflict.conflicts.slice(0, 3).map((pair) => (
                 <Typography.Text key={`${pair.left.slotId}-${pair.right.slotId}`} type="danger" style={{ fontSize: 12 }}>
@@ -427,7 +432,7 @@ export default function RoleAssign() {
                       onBlocked={(reason) => message.warning(reason)}
                     />
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      候选 {assessmentList.length} 人，其中 {blocked.length} 人因时段冲突被拦截。
+                      候选 {assessmentList.length} 人，其中 {blocked.length} 人被拦截（时段冲突或本场已演其他影人）。
                     </Typography.Text>
                   </Space>
                 );
